@@ -7,14 +7,6 @@
 
 import SwiftUI
 
-/// 仮のリポジトリデータ（後でModelに移動）
-struct Repository: Identifiable, Hashable {
-    let id = UUID()
-    let name: String
-    let url: String
-    let clonedAt: Date?
-}
-
 struct RepositoryInputView: View {
     @Environment(\.openSettings) private var openSettings
     @State private var repositories: [Repository] = []
@@ -71,6 +63,17 @@ struct RepositoryInputView: View {
             }
         }
         .navigationTitle("GitTale")
+        .task {
+            await loadRepositories()
+        }
+    }
+
+    private func loadRepositories() async {
+        do {
+            repositories = try await RepositoryStorage.shared.loadAll()
+        } catch {
+            print("Failed to load repositories: \(error)")
+        }
     }
 
     private func cloneRepository() {
@@ -79,23 +82,49 @@ struct RepositoryInputView: View {
         isCloning = true
         errorMessage = nil
 
-        // TODO: Implement actual clone logic
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            // 仮実装: リポジトリ名を抽出して一覧に追加
-            let repoName = extractRepositoryName(from: newRepositoryURL)
-            let newRepo = Repository(name: repoName, url: newRepositoryURL, clonedAt: Date())
-            repositories.append(newRepo)
-            selectedRepository = newRepo
-            newRepositoryURL = ""
-            isCloning = false
-        }
-    }
+        Task {
+            do {
+                // URLを解析してowner/nameを取得
+                let (owner, name) = try await GitService.shared.parseRepositoryURL(newRepositoryURL)
 
-    private func extractRepositoryName(from url: String) -> String {
-        // URLからリポジトリ名を抽出
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        let withoutGit = trimmed.hasSuffix(".git") ? String(trimmed.dropLast(4)) : trimmed
-        return withoutGit.components(separatedBy: "/").last ?? "Unknown"
+                // 既に存在するか確認
+                if await RepositoryStorage.shared.exists(owner: owner, name: name) {
+                    await MainActor.run {
+                        errorMessage = "このリポジトリは既にクローン済みです"
+                        isCloning = false
+                    }
+                    return
+                }
+
+                // ディレクトリを作成
+                let settings = AppSettings.shared
+                try settings.ensureDirectoryStructureExists()
+                try settings.ensureRepositoryDirectoryExists(owner: owner, name: name)
+
+                // クローン先のパス
+                let destination = settings.repositorySourceURL(owner: owner, name: name)
+
+                // git clone実行
+                try await GitService.shared.clone(url: newRepositoryURL, to: destination)
+
+                // メタデータを保存
+                let newRepo = Repository(owner: owner, name: name, url: newRepositoryURL)
+                try await RepositoryStorage.shared.save(newRepo)
+
+                // UIを更新
+                await MainActor.run {
+                    repositories.append(newRepo)
+                    selectedRepository = newRepo
+                    newRepositoryURL = ""
+                    isCloning = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    isCloning = false
+                }
+            }
+        }
     }
 }
 
@@ -109,13 +138,11 @@ struct RepositoryRow: View {
             Image(systemName: "folder.fill")
                 .foregroundStyle(.blue)
             VStack(alignment: .leading) {
-                Text(repository.name)
+                Text(repository.displayName)
                     .font(.body)
-                if let date = repository.clonedAt {
-                    Text(date, format: .relative(presentation: .named))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(repository.clonedAt, format: .relative(presentation: .named))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 2)
@@ -189,7 +216,7 @@ struct RepositoryDetailView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
 
-            Text(repository.name)
+            Text(repository.displayName)
                 .font(.title)
                 .fontWeight(.bold)
 
