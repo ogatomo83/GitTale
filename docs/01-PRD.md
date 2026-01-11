@@ -50,10 +50,11 @@ Gitリポジトリのコミットログを、AIの力で意味のある「開発
 ### 2.1 MV（Minimum Viable）機能
 
 #### FR-001: リポジトリ操作
-- **FR-001-01**: ローカルGitリポジトリをドラッグ&ドロップで開く
-- **FR-001-02**: 最近開いたリポジトリの履歴表示（UserDefaults）
-- **FR-001-03**: `git log --reverse --all` でコミット履歴取得
-- **FR-001-04**: `git checkout` で任意のコミットに移動（読み取り専用モード）
+- **FR-001-01**: リポジトリURL（GitHub等）を指定して `git clone` で自動取得
+- **FR-001-02**: クローン先は設定可能なソースディレクトリ（デフォルト: `$HOME/GitTaleSourceDir/{repository_name}`）
+- **FR-001-03**: 最近開いたリポジトリの履歴表示（UserDefaults）
+- **FR-001-04**: `git log --reverse --all` でコミット履歴取得（最初のコミットから順に）
+- **FR-001-05**: `git checkout` で任意のコミットに移動し、その時点のコードを参照可能
 
 #### FR-002: コミット解析
 - **FR-002-01**: `git log --format` でコミット情報抽出（SHA, Author, Date, Message, Parents）
@@ -175,20 +176,21 @@ struct DiffMetadata {
 ### 5.1 ディレクトリ構造
 
 ```
-/path/to/repository/
-├── .git/                    # Git本体（読み取りのみ）
-├── .gittale/                # GitTaleキャッシュ
-│   ├── .gitignore           # "**" で全体を無視
-│   └── cache/
-│       ├── commits/
-│       │   ├── abc1234.json # 個別コミット要約
-│       │   └── def5678.json
-│       ├── groups/
-│       │   └── 2024-w03.json # 週間グループ要約
-│       ├── versions/
-│       │   └── v1.0.0.json  # バージョン要約
-│       └── story.json       # プロジェクト全体ストーリー
-└── src/                     # 実際のソースコード
+$HOME/GitTaleSourceDir/          # アプリ設定で変更可能なソースディレクトリ
+└── {repository_name}/           # クローンしたリポジトリ
+    ├── .git/                    # Git本体（読み取りのみ）
+    ├── .gittale/                # GitTaleキャッシュ
+    │   ├── .gitignore           # "**" で全体を無視
+    │   └── cache/
+    │       ├── commits/
+    │       │   ├── abc1234.json # 個別コミット要約
+    │       │   └── def5678.json
+    │       ├── groups/
+    │       │   └── 2024-w03.json # 週間グループ要約
+    │       ├── versions/
+    │       │   └── v1.0.0.json  # バージョン要約
+    │       └── story.json       # プロジェクト全体ストーリー
+    └── src/                     # 実際のソースコード
 ```
 
 ### 5.2 キャッシュ無効化
@@ -222,12 +224,13 @@ func ensureGitIgnore(in gittaleDir: URL) {
 ## 6. 制約事項
 
 ### 6.1 スコープ内
-- ローカルGitリポジトリの解析
+- リモートリポジトリURLからの自動クローン
+- クローンしたリポジトリの解析
+- 最初のコミットから順にコードの歴史を追跡
 - AI要約の生成とキャッシュ
-- 読み取り専用の履歴閲覧
+- 任意のコミット時点のコード参照
 
 ### 6.2 スコープ外
-- リモートリポジトリの直接クローン
 - コード編集・コミット作成
 - Windows/Linux対応
 - リアルタイムコラボレーション
