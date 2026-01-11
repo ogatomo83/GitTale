@@ -16,6 +16,7 @@ struct Repository: Identifiable, Hashable {
 }
 
 struct RepositoryInputView: View {
+    @Environment(\.openSettings) private var openSettings
     @State private var repositories: [Repository] = []
     @State private var selectedRepository: Repository?
     @State private var newRepositoryURL: String = ""
@@ -42,6 +43,18 @@ struct RepositoryInputView: View {
                     }
                     .help("新しいリポジトリを追加")
                 }
+            }
+            .safeAreaInset(edge: .bottom) {
+                HStack {
+                    Button(action: { openSettings() }) {
+                        Image(systemName: "gear")
+                    }
+                    .buttonStyle(.plain)
+                    .help("設定")
+
+                    Spacer()
+                }
+                .padding(12)
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 250)
         } detail: {

@@ -176,21 +176,27 @@ struct DiffMetadata {
 ### 5.1 ディレクトリ構造
 
 ```
-$HOME/GitTaleSourceDir/          # アプリ設定で変更可能なソースディレクトリ
-└── {repository_name}/           # クローンしたリポジトリ
-    ├── .git/                    # Git本体（読み取りのみ）
-    ├── .gittale/                # GitTaleキャッシュ
-    │   ├── .gitignore           # "**" で全体を無視
-    │   └── cache/
-    │       ├── commits/
-    │       │   ├── abc1234.json # 個別コミット要約
-    │       │   └── def5678.json
-    │       ├── groups/
-    │       │   └── 2024-w03.json # 週間グループ要約
-    │       ├── versions/
-    │       │   └── v1.0.0.json  # バージョン要約
-    │       └── story.json       # プロジェクト全体ストーリー
-    └── src/                     # 実際のソースコード
+~/.GitTale/                          # アプリのベースディレクトリ（設定で変更可能）
+├── repositories/                    # リポジトリ格納ディレクトリ
+│   ├── rails/                       # owner名
+│   │   └── rails/                   # repository名
+│   │       ├── rails.json           # リポジトリメタデータ（URL, clonedAt等）
+│   │       └── source/              # クローンしたソースコード
+│   │           ├── .git/
+│   │           └── ...
+│   └── nodejs/
+│       └── node/
+│           ├── node.json
+│           └── source/
+└── cache/                           # AI要約キャッシュ
+    ├── commits/
+    │   ├── abc1234.json             # 個別コミット要約
+    │   └── def5678.json
+    ├── groups/
+    │   └── 2024-w03.json            # 週間グループ要約
+    ├── versions/
+    │   └── v1.0.0.json              # バージョン要約
+    └── story.json                   # プロジェクト全体ストーリー
 ```
 
 ### 5.2 キャッシュ無効化
