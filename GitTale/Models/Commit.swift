@@ -8,7 +8,7 @@
 import Foundation
 
 /// Gitコミット情報
-struct Commit: Identifiable, Hashable {
+struct Commit: Identifiable, Hashable, Codable {
     let sha: String
     let shortSHA: String
     let author: String
@@ -28,16 +28,23 @@ struct Commit: Identifiable, Hashable {
     var isMergeCommit: Bool {
         parentSHAs.count > 1
     }
+
+    // Codable: computedプロパティを除外
+    enum CodingKeys: String, CodingKey {
+        case sha, shortSHA, author, email, date, message, parentSHAs
+    }
 }
 
 /// リポジトリの進捗状況
 struct RepositoryProgress: Codable {
     var checkedCommitSHAs: Set<String>
     var lastUpdated: Date
+    var currentCheckoutSHA: String?  // 現在チェックアウト中のSHA
 
-    init(checkedCommitSHAs: Set<String> = [], lastUpdated: Date = Date()) {
+    init(checkedCommitSHAs: Set<String> = [], lastUpdated: Date = Date(), currentCheckoutSHA: String? = nil) {
         self.checkedCommitSHAs = checkedCommitSHAs
         self.lastUpdated = lastUpdated
+        self.currentCheckoutSHA = currentCheckoutSHA
     }
 
     /// コミットが確認済みかどうか
@@ -52,6 +59,12 @@ struct RepositoryProgress: Codable {
         } else {
             checkedCommitSHAs.insert(sha)
         }
+        lastUpdated = Date()
+    }
+
+    /// チェックアウト状態を更新
+    mutating func setCheckout(_ sha: String?) {
+        currentCheckoutSHA = sha
         lastUpdated = Date()
     }
 }
