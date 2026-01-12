@@ -261,6 +261,106 @@ actor GitService {
         print("[GitService] pull完了")
     }
 
+    // MARK: - Diff
+
+    /// 変更されたファイル一覧を取得（1コミット）
+    func getChangedFiles(sha: String, at repositoryPath: URL) async throws -> [ChangedFile] {
+        print("[GitService] 変更ファイル一覧を取得中: \(sha.prefix(8))...")
+
+        let output = try await execute(
+            ["diff-tree", "--no-commit-id", "--name-status", "-r", sha],
+            at: repositoryPath
+        )
+
+        let files = output.components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .compactMap { line -> ChangedFile? in
+                let parts = line.components(separatedBy: "\t")
+                guard parts.count >= 2 else { return nil }
+                let status = ChangeStatus(rawValue: String(parts[0].prefix(1))) ?? .modified
+                let path = parts[1]
+                return ChangedFile(path: path, status: status)
+            }
+
+        print("[GitService] \(files.count)件の変更ファイルを取得")
+        return files
+    }
+
+    /// 変更されたファイル一覧を取得（2コミット間）
+    func getChangedFilesBetween(from fromSHA: String, to toSHA: String, at repositoryPath: URL) async throws -> [ChangedFile] {
+        print("[GitService] 変更ファイル一覧を取得中: \(fromSHA.prefix(8))..\(toSHA.prefix(8))...")
+
+        let output = try await execute(
+            ["diff", "--name-status", fromSHA, toSHA],
+            at: repositoryPath
+        )
+
+        let files = output.components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .compactMap { line -> ChangedFile? in
+                let parts = line.components(separatedBy: "\t")
+                guard parts.count >= 2 else { return nil }
+                let status = ChangeStatus(rawValue: String(parts[0].prefix(1))) ?? .modified
+                let path = parts[1]
+                return ChangedFile(path: path, status: status)
+            }
+
+        print("[GitService] \(files.count)件の変更ファイルを取得")
+        return files
+    }
+
+    /// ファイルの差分を取得（1コミット）
+    func getFileDiff(sha: String, filePath: String, at repositoryPath: URL) async throws -> String {
+        print("[GitService] ファイル差分を取得中: \(filePath)")
+
+        let output = try await execute(
+            ["show", "--format=", sha, "--", filePath],
+            at: repositoryPath
+        )
+
+        return output
+    }
+
+    /// ファイルの差分を取得（2コミット間）
+    func getFileDiffBetween(from fromSHA: String, to toSHA: String, filePath: String, at repositoryPath: URL) async throws -> String {
+        print("[GitService] ファイル差分を取得中: \(filePath) (\(fromSHA.prefix(8))..\(toSHA.prefix(8)))")
+
+        let output = try await execute(
+            ["diff", fromSHA, toSHA, "--", filePath],
+            at: repositoryPath
+        )
+
+        return output
+    }
+
+    /// ファイルの内容を取得
+    func getFileContent(sha: String, filePath: String, at repositoryPath: URL) async throws -> String {
+        print("[GitService] ファイル内容を取得中: \(filePath) @ \(sha.prefix(8))")
+
+        let output = try await execute(
+            ["show", "\(sha):\(filePath)"],
+            at: repositoryPath
+        )
+
+        return output
+    }
+
+    // MARK: - File Tree
+
+    /// リポジトリ内の全ファイルパスを取得
+    func getAllFilePaths(sha: String, at repositoryPath: URL) async throws -> [String] {
+        print("[GitService] ファイルツリーを取得中: \(sha.prefix(8))...")
+
+        let output = try await execute(
+            ["ls-tree", "-r", "--name-only", sha],
+            at: repositoryPath
+        )
+
+        let files = output.components(separatedBy: "\n").filter { !$0.isEmpty }
+        print("[GitService] \(files.count)件のファイルを取得")
+        return files
+    }
+
     // MARK: - Git Command Execution
 
     /// Gitコマンドを実行

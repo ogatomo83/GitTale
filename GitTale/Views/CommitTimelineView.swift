@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct CommitTimelineView: View {
+    @Environment(\.openWindow) private var openWindow
     let repository: Repository
 
     // SHAリスト（軽量）
@@ -20,14 +21,23 @@ struct CommitTimelineView: View {
     @State private var displayedCommits: [Commit] = []
 
     @State private var progress: RepositoryProgress = RepositoryProgress()
-    @State private var selectedCommit: Commit?
+    @State private var selectedCommits: Set<Commit> = []  // マルチ選択対応
     @State private var isLoading = true
     @State private var loadingMessage = "読み込み中..."
     @State private var errorMessage: String?
-    @State private var currentCheckoutSHA: String?
     @State private var isFetching = false
 
     private let batchSize = 50  // 一度に読み込む件数
+
+    /// 現在のチェックアウトSHA（progressから取得）
+    private var currentCheckoutSHA: String? {
+        progress.currentCheckoutSHA
+    }
+
+    /// 選択されたコミット（古い順にソート）
+    private var sortedSelectedCommits: [Commit] {
+        selectedCommits.sorted { $0.date < $1.date }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -64,31 +74,27 @@ struct CommitTimelineView: View {
                         totalCount: commitSHAs.count,
                         progress: progress,
                         currentCheckoutSHA: currentCheckoutSHA,
-                        selectedCommit: $selectedCommit,
+                        selectedCommits: $selectedCommits,
                         onToggle: toggleCommit,
                         onLoadMore: loadMoreCommits,
-                        onDoubleClick: checkoutCommit
+                        onOpenDiff: openDiffViewer,
+                        onCheckout: checkoutCommit,
+                        onBrowseFiles: browseCurrentFiles
                     )
                     .frame(minWidth: 300, maxWidth: 500)
 
                     Divider()
 
-                    // Commit Detail
-                    if let commit = selectedCommit {
-                        CommitDetailPanel(
-                            commit: commit,
-                            isChecked: progress.isChecked(commit.sha),
-                            onToggle: { toggleCommit(commit) }
-                        )
-                        .frame(maxWidth: .infinity)
-                    } else {
-                        ContentUnavailableView(
-                            "コミットを選択",
-                            systemImage: "doc.text.magnifyingglass",
-                            description: Text("左のリストからコミットを選択してください")
-                        )
-                        .frame(maxWidth: .infinity)
-                    }
+                    // Commit Detail / Selection Panel
+                    CommitSelectionPanel(
+                        selectedCommits: sortedSelectedCommits,
+                        progress: progress,
+                        currentCheckoutSHA: currentCheckoutSHA,
+                        onToggle: toggleCommit,
+                        onOpenDiff: openDiffViewer,
+                        onBrowseFiles: browseCurrentFiles
+                    )
+                    .frame(maxWidth: .infinity)
                 }
             }
         }
@@ -269,8 +275,39 @@ struct CommitTimelineView: View {
         }
     }
 
+    // MARK: - Diff Viewer
+
+    private func openDiffViewer() {
+        let commits = sortedSelectedCommits
+        guard !commits.isEmpty, commits.count <= 2 else { return }
+
+        Task {
+            let settings = AppSettings.shared
+            let sourcePath = settings.repositorySourceURL(owner: repository.owner, name: repository.name)
+
+            do {
+                // 新しい方のコミットにチェックアウト
+                let targetSHA = commits.count == 1 ? commits[0].sha : commits[1].sha
+                try await GitService.shared.checkout(sha: targetSHA, at: sourcePath)
+
+                // 進捗にチェックアウト状態を保存
+                await MainActor.run {
+                    progress.setCheckout(targetSHA)
+                }
+                try await ProgressStorage.shared.save(progress, owner: repository.owner, name: repository.name)
+
+                // 差分ビューアウィンドウを開く
+                let data = DiffViewerData(repository: repository, commits: commits)
+                openWindow(id: "diff-viewer", value: data)
+            } catch {
+                print("[CommitTimelineView] チェックアウトエラー: \(error)")
+            }
+        }
+    }
+
     // MARK: - Checkout
 
+    /// 特定のコミットにチェックアウト（ダブルクリック用）
     private func checkoutCommit(_ commit: Commit) {
         Task {
             let settings = AppSettings.shared
@@ -278,9 +315,13 @@ struct CommitTimelineView: View {
 
             do {
                 try await GitService.shared.checkout(sha: commit.sha, at: sourcePath)
+
+                // 進捗にチェックアウト状態を保存
                 await MainActor.run {
-                    currentCheckoutSHA = commit.sha
+                    progress.setCheckout(commit.sha)
                 }
+                try await ProgressStorage.shared.save(progress, owner: repository.owner, name: repository.name)
+                print("[CommitTimelineView] チェックアウト完了: \(commit.shortSHA)")
             } catch {
                 print("[CommitTimelineView] チェックアウトエラー: \(error)")
             }
@@ -294,11 +335,48 @@ struct CommitTimelineView: View {
 
             do {
                 try await GitService.shared.checkoutDefaultBranch(at: sourcePath)
+
+                // 進捗のチェックアウト状態をクリア
                 await MainActor.run {
-                    currentCheckoutSHA = nil
+                    progress.setCheckout(nil)
                 }
+                try await ProgressStorage.shared.save(progress, owner: repository.owner, name: repository.name)
             } catch {
                 print("[CommitTimelineView] 最新チェックアウトエラー: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Browse Files
+
+    /// ファイルを閲覧（チェックアウト中のSHAまたは最新コミット）
+    private func browseCurrentFiles() {
+        // チェックアウト中のSHAがあればそれを使う、なければ最新コミット
+        let targetSHA = currentCheckoutSHA ?? commitSHAs.last
+
+        guard let sha = targetSHA else { return }
+
+        Task {
+            // キャッシュにあればそのまま使う
+            if let commit = commitCache[sha] {
+                let data = DiffViewerData(repository: repository, commits: [commit], browseMode: true)
+                openWindow(id: "diff-viewer", value: data)
+                return
+            }
+
+            // キャッシュにない場合は読み込む
+            let settings = AppSettings.shared
+            let sourcePath = settings.repositorySourceURL(owner: repository.owner, name: repository.name)
+
+            do {
+                let commit = try await GitService.shared.getCommitDetail(sha: sha, at: sourcePath)
+                await MainActor.run {
+                    commitCache[sha] = commit
+                }
+                let data = DiffViewerData(repository: repository, commits: [commit], browseMode: true)
+                openWindow(id: "diff-viewer", value: data)
+            } catch {
+                print("[CommitTimelineView] コミット読み込みエラー: \(error)")
             }
         }
     }
@@ -332,20 +410,25 @@ struct CommitTimelineView: View {
 
                         await MainActor.run {
                             commitSHAs.append(contentsOf: newSHAs)
-                            currentCheckoutSHA = nil
                         }
                         print("[CommitTimelineView] \(newSHAs.count)件の新規コミットを取得")
                     } else {
                         print("[CommitTimelineView] 新しいコミットはありません")
                     }
                 }
+
+                // チェックアウト状態をクリアして保存
+                await MainActor.run {
+                    progress.setCheckout(nil)
+                }
+                try await ProgressStorage.shared.save(progress, owner: repository.owner, name: repository.name)
+
             } catch {
                 print("[CommitTimelineView] フェッチエラー: \(error)")
             }
 
             await MainActor.run {
                 isFetching = false
-                currentCheckoutSHA = nil
             }
         }
     }
@@ -420,48 +503,122 @@ struct TimelineListView: View {
     let totalCount: Int
     let progress: RepositoryProgress
     let currentCheckoutSHA: String?
-    @Binding var selectedCommit: Commit?
+    @Binding var selectedCommits: Set<Commit>
     let onToggle: (Commit) -> Void
     let onLoadMore: () -> Void
-    let onDoubleClick: (Commit) -> Void
+    let onOpenDiff: () -> Void
+    let onCheckout: (Commit) -> Void
+    let onBrowseFiles: () -> Void
 
     var body: some View {
-        List(selection: $selectedCommit) {
-            ForEach(Array(commits.enumerated()), id: \.element.id) { index, commit in
-                CommitRowView(
-                    index: index + 1,
-                    commit: commit,
-                    isChecked: progress.isChecked(commit.sha),
-                    isSelected: selectedCommit?.sha == commit.sha,
-                    isCheckedOut: currentCheckoutSHA == commit.sha,
-                    onToggle: { onToggle(commit) }
-                )
-                .tag(commit)
-                .onTapGesture(count: 2) {
-                    onDoubleClick(commit)
+        VStack(spacing: 0) {
+            // ファイル閲覧バー（常に表示）
+            HStack {
+                if let sha = currentCheckoutSHA {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .foregroundStyle(.blue)
+                    Text("チェックアウト中: \(sha.prefix(7))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Image(systemName: "doc.text")
+                        .foregroundStyle(.secondary)
+                    Text("最新コミット")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .onTapGesture(count: 1) {
-                    selectedCommit = commit
-                }
-            }
 
-            // Load More Button
-            if commits.count < totalCount {
+                Spacer()
+
+                Button(action: onBrowseFiles) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "folder")
+                        Text("ファイルを見る")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(currentCheckoutSHA != nil ? Color.blue.opacity(0.1) : Color(nsColor: .controlBackgroundColor))
+
+            Divider()
+
+            // 選択中の表示とボタン
+            if !selectedCommits.isEmpty {
                 HStack {
+                    Text("\(selectedCommits.count)件選択中")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Spacer()
-                    Button(action: onLoadMore) {
-                        HStack {
-                            Image(systemName: "arrow.down.circle")
-                            Text("さらに読み込む (\(commits.count)/\(totalCount))")
+
+                    if selectedCommits.count <= 2 {
+                        Button(action: onOpenDiff) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc.text.magnifyingglass")
+                                Text("差分を表示")
+                            }
                         }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    Button("選択解除") {
+                        selectedCommits.removeAll()
                     }
                     .buttonStyle(.bordered)
-                    Spacer()
                 }
-                .padding(.vertical, 12)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color(nsColor: .controlBackgroundColor))
+
+                Divider()
             }
+
+            List(selection: $selectedCommits) {
+                ForEach(Array(commits.enumerated()), id: \.element.id) { index, commit in
+                    CommitRowView(
+                        index: index + 1,
+                        commit: commit,
+                        isChecked: progress.isChecked(commit.sha),
+                        isSelected: selectedCommits.contains(commit),
+                        isCheckedOut: currentCheckoutSHA == commit.sha,
+                        onToggle: { onToggle(commit) }
+                    )
+                    .tag(commit)
+                    .onTapGesture(count: 2) {
+                        // ダブルクリックでチェックアウト
+                        onCheckout(commit)
+                    }
+                    .onTapGesture(count: 1) {
+                        // シングルクリックで選択
+                        if selectedCommits.contains(commit) {
+                            selectedCommits.remove(commit)
+                        } else {
+                            selectedCommits.insert(commit)
+                        }
+                    }
+                }
+
+                // Load More Button
+                if commits.count < totalCount {
+                    HStack {
+                        Spacer()
+                        Button(action: onLoadMore) {
+                            HStack {
+                                Image(systemName: "arrow.down.circle")
+                                Text("さらに読み込む (\(commits.count)/\(totalCount))")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        Spacer()
+                    }
+                    .padding(.vertical, 12)
+                }
+            }
+            .listStyle(.inset)
         }
-        .listStyle(.inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -628,6 +785,168 @@ struct MetadataRow: View {
                 .font(.body)
                 .monospaced()
                 .textSelection(.enabled)
+        }
+    }
+}
+
+// MARK: - Commit Selection Panel
+
+struct CommitSelectionPanel: View {
+    let selectedCommits: [Commit]  // 古い順にソート済み
+    let progress: RepositoryProgress
+    let currentCheckoutSHA: String?
+    let onToggle: (Commit) -> Void
+    let onOpenDiff: () -> Void
+    let onBrowseFiles: () -> Void
+
+    var body: some View {
+        if selectedCommits.isEmpty {
+            // 未選択時: ファイル閲覧を促す
+            VStack(spacing: 16) {
+                if currentCheckoutSHA != nil {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.blue)
+                    Text("コミットにチェックアウト中")
+                        .font(.headline)
+                } else {
+                    Image(systemName: "folder")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("ファイルを閲覧")
+                        .font(.headline)
+                }
+
+                Text("現在のファイル状態を閲覧できます")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Button(action: onBrowseFiles) {
+                    HStack {
+                        Image(systemName: "folder")
+                        Text("ファイルを見る")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Divider()
+                    .padding(.vertical)
+
+                Text("または左のリストからコミットを選択して\n差分を確認できます\nダブルクリックでチェックアウト")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding()
+        } else if selectedCommits.count == 1 {
+            // 1件選択
+            let commit = selectedCommits[0]
+            VStack(spacing: 0) {
+                CommitDetailPanel(
+                    commit: commit,
+                    isChecked: progress.isChecked(commit.sha),
+                    onToggle: { onToggle(commit) }
+                )
+
+                Divider()
+
+                // 差分を表示ボタン
+                HStack {
+                    Spacer()
+                    Button(action: onOpenDiff) {
+                        HStack {
+                            Image(systemName: "doc.text.magnifyingglass")
+                            Text("差分を表示")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    Spacer()
+                }
+                .padding()
+            }
+        } else if selectedCommits.count == 2 {
+            // 2件選択
+            VStack(spacing: 16) {
+                Text("2つのコミットを比較")
+                    .font(.headline)
+
+                // 古いコミット
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("From (古い)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    CommitSummaryRow(commit: selectedCommits[0])
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                Image(systemName: "arrow.down")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+
+                // 新しいコミット
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("To (新しい)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    CommitSummaryRow(commit: selectedCommits[1])
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                Spacer()
+
+                // 差分を表示ボタン
+                Button(action: onOpenDiff) {
+                    HStack {
+                        Image(systemName: "doc.text.magnifyingglass")
+                        Text("差分を表示")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+            .padding()
+        } else {
+            // 3件以上選択
+            ContentUnavailableView(
+                "2つまで選択してください",
+                systemImage: "exclamationmark.triangle",
+                description: Text("\(selectedCommits.count)件選択中\n比較できるのは最大2つのコミットです")
+            )
+        }
+    }
+}
+
+// MARK: - Commit Summary Row
+
+struct CommitSummaryRow: View {
+    let commit: Commit
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(commit.subject)
+                .font(.body)
+                .lineLimit(2)
+
+            HStack(spacing: 8) {
+                Text(commit.shortSHA)
+                    .font(.caption)
+                    .monospaced()
+                    .foregroundStyle(.secondary)
+
+                Text(commit.author)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(commit.date, format: .dateTime.month().day().year())
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 }
