@@ -426,101 +426,206 @@ struct TabButton: View {
     }
 }
 
-// MARK: - Diff Lines View
+// MARK: - Diff Lines View (Selectable)
 
 struct DiffLinesView: View {
     let lines: [DiffLine]
-    @State private var hoveredLineId: UUID?
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollView([.horizontal, .vertical]) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(lines) { line in
-                        DiffLineRowView(
-                            line: line,
-                            minWidth: geometry.size.width,
-                            isHovered: hoveredLineId == line.id
-                        )
-                        .onHover { isHovered in
-                            hoveredLineId = isHovered ? line.id : nil
-                        }
-                    }
-                }
-            }
+        HStack(spacing: 0) {
+            // 左側: 行番号・差分記号ガター（SwiftUI）
+            DiffGutterView(lines: lines)
+
+            // 右側: コード内容（NSTextView - 選択可能）
+            SelectableDiffContentView(lines: lines)
         }
-        .font(.system(size: 13, weight: .regular, design: .monospaced))
         .background(EditorColors.background)
     }
 }
 
-// MARK: - Diff Line Row View
+// MARK: - Diff Gutter View
 
-struct DiffLineRowView: View {
-    let line: DiffLine
-    let minWidth: CGFloat
-    let isHovered: Bool
+struct DiffGutterView: View {
+    let lines: [DiffLine]
 
     var body: some View {
-        HStack(spacing: 0) {
-            // ガター（行番号エリア）
-            HStack(spacing: 0) {
-                // 行番号
-                Text(line.lineNumber.map { String($0) } ?? "")
-                    .frame(width: 48, alignment: .trailing)
-                    .foregroundStyle(EditorColors.lineNumber)
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .trailing, spacing: 0) {
+                ForEach(lines) { line in
+                    HStack(spacing: 0) {
+                        // 行番号
+                        Text(line.lineNumber.map { String($0) } ?? "")
+                            .frame(width: 40, alignment: .trailing)
+                            .foregroundStyle(EditorColors.lineNumber)
 
-                // 差分記号
-                Text(diffSymbol)
-                    .frame(width: 20, alignment: .center)
-                    .foregroundStyle(diffSymbolColor)
+                        // 差分記号
+                        Text(diffSymbol(for: line.type))
+                            .frame(width: 20, alignment: .center)
+                            .foregroundStyle(diffSymbolColor(for: line.type))
+                    }
+                    .frame(height: 20)
+                    .background(gutterBackground(for: line.type))
+                }
             }
-            .padding(.trailing, 8)
-            .background(gutterBackground)
-
-            // コード内容
-            Text(line.content.isEmpty ? " " : line.content)
-                .foregroundStyle(line.type == .context ? EditorColors.text : line.type.color)
-                .textSelection(.enabled)
-                .padding(.leading, 8)
+            .padding(.trailing, 4)
         }
-        .frame(height: 22)
-        .frame(minWidth: minWidth, alignment: .leading)
-        .background(lineBackground)
+        .frame(width: 68)
+        .background(EditorColors.gutter)
+        .disabled(true)  // スクロール連動のみ
     }
 
-    private var diffSymbol: String {
-        switch line.type {
+    private func diffSymbol(for type: DiffLineType) -> String {
+        switch type {
         case .added: return "+"
         case .deleted: return "−"
         default: return ""
         }
     }
 
-    private var diffSymbolColor: Color {
-        switch line.type {
+    private func diffSymbolColor(for type: DiffLineType) -> Color {
+        switch type {
         case .added: return EditorColors.addedText
         case .deleted: return EditorColors.deletedText
         default: return .clear
         }
     }
 
-    private var gutterBackground: Color {
-        switch line.type {
+    private func gutterBackground(for type: DiffLineType) -> Color {
+        switch type {
         case .added: return EditorColors.addedGutter
         case .deleted: return EditorColors.deletedGutter
-        default: return EditorColors.gutter
+        default: return .clear
+        }
+    }
+}
+
+// MARK: - Selectable Diff Content View (NSTextView wrapper)
+
+struct SelectableDiffContentView: NSViewRepresentable {
+    let lines: [DiffLine]
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        let textView = DiffTextView()
+
+        // テキストビュー設定
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.backgroundColor = NSColor(EditorColors.background)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.textContainerInset = NSSize(width: 8, height: 0)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+
+        // スクロールビュー設定
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
+        scrollView.backgroundColor = NSColor(EditorColors.background)
+
+        // 横スクロール対応
+        textView.isHorizontallyResizable = true
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? DiffTextView else { return }
+        textView.updateContent(lines: lines)
+    }
+}
+
+// MARK: - Diff Text View (Custom NSTextView with line backgrounds)
+
+class DiffTextView: NSTextView {
+    private var lineBackgrounds: [(range: NSRange, color: NSColor)] = []
+
+    func updateContent(lines: [DiffLine]) {
+        // Attributed stringを構築
+        let attributedString = NSMutableAttributedString()
+        lineBackgrounds = []
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.minimumLineHeight = 20
+        paragraphStyle.maximumLineHeight = 20
+
+        var currentLocation = 0
+
+        for (index, line) in lines.enumerated() {
+            let content = line.content + (index < lines.count - 1 ? "\n" : "")
+            let textColor = textColor(for: line.type)
+
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                .foregroundColor: textColor,
+                .paragraphStyle: paragraphStyle
+            ]
+
+            attributedString.append(NSAttributedString(string: content, attributes: attributes))
+
+            // 背景色の範囲を記録
+            let bgColor = backgroundColor(for: line.type)
+            if bgColor != NSColor.clear {
+                let range = NSRange(location: currentLocation, length: content.count)
+                lineBackgrounds.append((range: range, color: bgColor))
+            }
+
+            currentLocation += content.count
+        }
+
+        // 変更があった場合のみ更新
+        if textStorage?.string != attributedString.string {
+            textStorage?.setAttributedString(attributedString)
+            needsDisplay = true
         }
     }
 
-    private var lineBackground: Color {
-        if isHovered {
-            return EditorColors.hoverLine
+    override func draw(_ dirtyRect: NSRect) {
+        // 背景を描画
+        NSColor(EditorColors.background).setFill()
+        dirtyRect.fill()
+
+        // 行ごとの背景色を描画
+        guard let layoutManager = layoutManager, let textContainer = textContainer else {
+            super.draw(dirtyRect)
+            return
         }
-        switch line.type {
-        case .added: return EditorColors.addedLine
-        case .deleted: return EditorColors.deletedLine
-        default: return .clear
+
+        for (range, color) in lineBackgrounds {
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            var lineRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            lineRect.origin.x = 0
+            lineRect.size.width = bounds.width
+            lineRect.origin.y += textContainerInset.height
+
+            if lineRect.intersects(dirtyRect) {
+                color.setFill()
+                lineRect.fill()
+            }
+        }
+
+        super.draw(dirtyRect)
+    }
+
+    private func textColor(for type: DiffLineType) -> NSColor {
+        switch type {
+        case .added: return NSColor(EditorColors.addedText)
+        case .deleted: return NSColor(EditorColors.deletedText)
+        case .header: return NSColor.cyan
+        case .meta: return NSColor(EditorColors.lineNumber)
+        case .context: return NSColor(EditorColors.text)
+        }
+    }
+
+    private func backgroundColor(for type: DiffLineType) -> NSColor {
+        switch type {
+        case .added: return NSColor(EditorColors.addedLine)
+        case .deleted: return NSColor(EditorColors.deletedLine)
+        default: return NSColor.clear
         }
     }
 }
