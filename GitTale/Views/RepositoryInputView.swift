@@ -211,27 +211,7 @@ struct RepositoryDetailView: View {
     let repository: Repository
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "book.pages")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-
-            Text(repository.displayName)
-                .font(.title)
-                .fontWeight(.bold)
-
-            Text(repository.url)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospaced()
-
-            Divider()
-                .padding(.horizontal, 40)
-
-            Text("コミット履歴の表示は次のissueで実装予定です")
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        CommitTimelineView(repository: repository)
     }
 }
 
